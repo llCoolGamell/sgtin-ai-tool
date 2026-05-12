@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import tkinter as tk
@@ -143,13 +144,19 @@ def _escape_repl(m: re.Match) -> str:
 def unescape_line(line: str) -> str:
     """Заменить экранированные последовательности на реальные символы.
 
-    Поддерживает: \\u001d, \\xHH, \\n, \\t, \\\\, <GS>.
+    Поддерживает:
+    - HTML-сущности: &lt; &gt; &amp; &apos; &quot; (плюс остальные стандартные)
+    - GS1-метки: <GS>, [GS], \\u001d → \\x1d
+    - Python-эскейпы: \\n, \\t, \\r, \\xHH, \\uXXXX, \\\\
     """
     s = line
-    # Общепринятые замены для GS1-меток
+    # 1) HTML-сущности (то, о чём явно просил пользователь):
+    #    &lt; &gt; &amp; &apos; &quot; и прочие стандартные.
+    s = html.unescape(s)
+    # 2) Общепринятые placeholder'ы для GS1-меток.
     s = s.replace("<GS>", "\x1d").replace("<gs>", "\x1d")
     s = s.replace("[GS]", "\x1d").replace("[gs]", "\x1d")
-    # Замена стандартных escape-последовательностей
+    # 3) Стандартные Python-escape последовательности.
     s = _ESCAPE_RE.sub(_escape_repl, s)
     return s
 
