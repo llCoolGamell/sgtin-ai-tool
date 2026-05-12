@@ -124,8 +124,14 @@ class SgtinApp(tk.Tk):
         self.minsize(700, 520)
         self.configure(bg=BG)
 
+        # Буфер последних клавиатурных событий для диагностики.
+        self._key_log: list[str] = []
+        self._diag_text: tk.Text | None = None
+        self._last_log_serial: int | None = None
+
         self._setup_style()
         self._build_ui()
+        self._build_menu()
         self._bind_shortcuts()
 
     # ------------------------------------------------------------------
@@ -272,6 +278,199 @@ class SgtinApp(tk.Tk):
         self._attach_context_menu(text)
         return text
 
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+
+        edit = tk.Menu(menubar, tearoff=0)
+        edit.add_command(
+            label="Вырезать",
+            command=lambda: self._invoke_on_focused("<<Cut>>"),
+        )
+        edit.add_command(
+            label="Копировать",
+            command=lambda: self._invoke_on_focused("<<Copy>>"),
+        )
+        edit.add_command(
+            label="Вставить",
+            command=lambda: self._invoke_on_focused("<<Paste>>"),
+        )
+        edit.add_separator()
+        edit.add_command(
+            label="Выделить всё",
+            command=lambda: self._select_all_focused(),
+        )
+        edit.add_command(
+            label="Удалить выделенное",
+            command=lambda: self._delete_selection_focused(),
+        )
+        edit.add_separator()
+        edit.add_command(
+            label="Отменить",
+            command=lambda: self._undo_focused(),
+        )
+        edit.add_command(
+            label="Повторить",
+            command=lambda: self._redo_focused(),
+        )
+        menubar.add_cascade(label="Правка", menu=edit)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(
+            label="Диагностика клавиш",
+            command=self._open_diagnostics,
+        )
+        menubar.add_cascade(label="Помощь", menu=help_menu)
+
+    def _focused_text(self) -> tk.Text | None:
+        w = self.focus_get()
+        if isinstance(w, tk.Text):
+            return w
+        # Резерв — верхнее поле ввода.
+        return self.input_text
+
+    def _invoke_on_focused(self, virtual: str) -> None:
+        w = self._focused_text()
+        if w is not None:
+            w.event_generate(virtual)
+
+    def _select_all_focused(self) -> None:
+        w = self._focused_text()
+        if w is None:
+            return
+        w.tag_add("sel", "1.0", "end-1c")
+        w.mark_set("insert", "1.0")
+        w.see("insert")
+
+    def _delete_selection_focused(self) -> None:
+        w = self._focused_text()
+        if w is None:
+            return
+        try:
+            w.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+
+    def _undo_focused(self) -> None:
+        w = self._focused_text()
+        if w is None:
+            return
+        try:
+            w.edit_undo()
+        except tk.TclError:
+            pass
+
+    def _redo_focused(self) -> None:
+        w = self._focused_text()
+        if w is None:
+            return
+        try:
+            w.edit_redo()
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Диагностика клавиатуры
+    # ------------------------------------------------------------------
+    def _log_key_event(self, event: tk.Event) -> None:
+        # Пишем в лог только если диагностика жива (иначе быстро разрастётся).
+        if self._diag_text is None:
+            return
+        # Одно событие может прилететь и в <KeyPress>, и в <Control-KeyPress>;
+        # дедуплицируем по event.serial.
+        serial = getattr(event, "serial", None)
+        if serial is not None and serial == self._last_log_serial:
+            return
+        self._last_log_serial = serial
+        char = event.char
+        char_repr = "''" if char == "" else repr(char)
+        line = (
+            f"keysym={event.keysym!r:>18}  keycode={event.keycode:>4}  "
+            f"state=0x{event.state:08x}  char={char_repr}"
+        )
+        self._key_log.append(line)
+        self._key_log = self._key_log[-200:]
+        try:
+            self._diag_text.insert("end", line + "\n")
+            self._diag_text.see("end")
+        except tk.TclError:
+            self._diag_text = None
+
+    def _open_diagnostics(self) -> None:
+        if self._diag_text is not None:
+            try:
+                self._diag_text.winfo_toplevel().deiconify()
+                self._diag_text.winfo_toplevel().lift()
+                return
+            except tk.TclError:
+                self._diag_text = None
+
+        win = tk.Toplevel(self)
+        win.title("Диагностика клавиатуры")
+        win.geometry("760x420")
+        win.configure(bg=BG)
+
+        ttk.Label(
+            win,
+            text=(
+                "Сфокусируйтесь на верхнем/нижнем поле в главном окне и нажимайте Ctrl+А/С/М/Я — сюдат будет писаться, какой код приходит от Windows."
+            ),
+            style="Status.TLabel",
+            wraplength=720,
+        ).pack(fill="x", padx=10, pady=(10, 6))
+
+        frame = ttk.Frame(win, style="Card.TFrame")
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        frame.configure(borderwidth=1, relief="solid")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        log = tk.Text(
+            frame,
+            wrap="none",
+            font=FONT_MONO,
+            bg=CARD,
+            fg=TEXT,
+            relief="flat",
+            borderwidth=0,
+            padx=8,
+            pady=6,
+            highlightthickness=0,
+        )
+        log.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=log.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        log.configure(yscrollcommand=sb.set)
+
+        for line in self._key_log:
+            log.insert("end", line + "\n")
+        log.see("end")
+
+        btns = ttk.Frame(win, style="TFrame")
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            btns,
+            text="Очистить",
+            command=lambda: (self._key_log.clear(), log.delete("1.0", "end")),
+            style="Neutral.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            btns,
+            text="Скопировать в буфер",
+            command=lambda: (
+                self.clipboard_clear(),
+                self.clipboard_append("\n".join(self._key_log)),
+            ),
+            style="Primary.TButton",
+        ).pack(side="left", padx=(8, 0))
+
+        def on_close() -> None:
+            self._diag_text = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        self._diag_text = log
+
     def _attach_context_menu(self, widget: tk.Text) -> None:
         menu = tk.Menu(widget, tearoff=0)
         menu.add_command(
@@ -340,12 +539,14 @@ class SgtinApp(tk.Tk):
     }
 
     def _bind_shortcuts(self) -> None:
-        # Раньше пытались подвязывать <Control-Cyrillic_*> явно, но на Windows
-        # Tkinter при русской раскладке отдаёт другой keysym, чем на X11,
-        # из-за чего стандартные Ctrl+С / Ctrl+М на Windows не срабатывали.
-        # Решение — один обработчик <Control-KeyPress>, который диспетчеризует
-        # по event.keycode (на Windows это VK-код, не зависит от раскладки).
+        # На Windows Tkinter при русской раскладке в комбинациях с Ctrl event.keysym
+        # часто приходит как "??", и явные биндинги вроде <Control-Cyrillic_es>
+        # не срабатывают. Даже <Control-KeyPress> может не вызваться
+        # из-за разбора секвенции. Поэтому подвязываемся на сырой <KeyPress>
+        # и сами смотрим на event.state для Ctrl. Используем event.keycode
+        # (на Windows это VK-код — от раскладки не зависит).
         for widget in (self.input_text, self.output_text):
+            widget.bind("<KeyPress>", self._on_any_keypress, add="+")
             widget.bind("<Control-KeyPress>", self._on_ctrl_key)
             widget.bind("<Control-Insert>", self._copy)
             widget.bind("<Shift-Insert>", self._paste)
@@ -353,7 +554,22 @@ class SgtinApp(tk.Tk):
             widget.bind("<Delete>", self._on_delete)
             widget.bind("<BackSpace>", self._on_backspace)
 
+    def _on_any_keypress(self, event: tk.Event) -> str | None:
+        # Резервный путь: срабатывает на любой клавише; сами проверяем
+        # бит Ctrl в state. Нужно потому, что Tk на Windows при RU-раскладке
+        # может не вызывать <Control-KeyPress>, если keysym не распознан.
+        # Когда открыто окно диагностики — логируем всё, чтобы видеть,
+        # что вообще приходит от ОС.
+        if self._diag_text is not None:
+            self._log_key_event(event)
+        if not (event.state & 0x0004):  # Ctrl не зажат
+            return None
+        return self._on_ctrl_key(event)
+
     def _on_ctrl_key(self, event: tk.Event) -> str | None:
+        # Логируем в диагностику (если открыта) — всегда, даже если действие не найдено.
+        self._log_key_event(event)
+
         # Игнорируем модифицированные комбинации с Alt (например, AltGr на
         # Windows == Ctrl+Alt) — в них Ctrl нажимать не имели в виду.
         # Биты state: 0x0001 Shift, 0x0004 Control, 0x0008 Alt (X11),
@@ -364,6 +580,12 @@ class SgtinApp(tk.Tk):
         action = self._CTRL_ACTIONS.get(event.keycode)
         if action is None:
             action = self._CTRL_KEYSYMS.get(event.keysym)
+        # Резерв: на Windows при Ctrl+латиница event.char часто — control-символ
+        # (\x01..\x1a). Используем это как последний сигнал.
+        if action is None and event.char and len(event.char) == 1:
+            code = ord(event.char)
+            if 1 <= code <= 26:
+                action = self._CTRL_KEYSYMS.get(chr(code + ord("a") - 1))
         if action is None:
             return None  # не наш шорткат — дать сработать стандартному поведению
 
