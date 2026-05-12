@@ -308,63 +308,97 @@ class SgtinApp(tk.Tk):
         except tk.TclError:
             pass
 
+    # Windows virtual-key коды — НЕ зависят от раскладки.
+    # На X11 hardware keycodes другие (38=A, 54=C, 55=V, 53=X, 29=Y, 52=Z
+    # на типичной PC-клавиатуре), но тоже от раскладки не зависят.
+    _CTRL_ACTIONS = {
+        # Windows VK
+        65: "select_all", 67: "copy", 86: "paste",
+        88: "cut", 89: "redo", 90: "undo",
+        # X11 hardware keycodes (PC AT-101)
+        38: "select_all", 54: "copy", 55: "paste",
+        53: "cut", 29: "redo", 52: "undo",
+    }
+
+    # Резервный матчинг по keysym — на случай если keycode не помог
+    # (например, нестандартная клавиатура или X11 на другом железе).
+    _CTRL_KEYSYMS = {
+        # Латиница
+        "a": "select_all", "A": "select_all",
+        "c": "copy", "C": "copy",
+        "v": "paste", "V": "paste",
+        "x": "cut", "X": "cut",
+        "y": "redo", "Y": "redo",
+        "z": "undo", "Z": "undo",
+        # Кириллица (для X11)
+        "Cyrillic_ef": "select_all", "Cyrillic_EF": "select_all",
+        "Cyrillic_es": "copy", "Cyrillic_ES": "copy",
+        "Cyrillic_em": "paste", "Cyrillic_EM": "paste",
+        "Cyrillic_che": "cut", "Cyrillic_CHE": "cut",
+        "Cyrillic_en": "redo", "Cyrillic_EN": "redo",
+        "Cyrillic_ya": "undo", "Cyrillic_YA": "undo",
+    }
+
     def _bind_shortcuts(self) -> None:
-        # Маппинг действий: и латинская раскладка, и кириллическая (на тех же
-        # клавишах). В Tk при русской раскладке keysym становится Cyrillic_*
-        # и стандартные Control-a/c/v/x/z не срабатывают, поэтому
-        # подвязываем оба варианта.
-        select_all_keys = (
-            "<Control-a>", "<Control-A>",
-            "<Control-Cyrillic_ef>", "<Control-Cyrillic_EF>",  # Ф
-        )
-        copy_keys = (
-            "<Control-c>", "<Control-C>",
-            "<Control-Cyrillic_es>", "<Control-Cyrillic_ES>",  # С
-            "<Control-Insert>",
-        )
-        paste_keys = (
-            "<Control-v>", "<Control-V>",
-            "<Control-Cyrillic_em>", "<Control-Cyrillic_EM>",  # М
-            "<Shift-Insert>",
-        )
-        cut_keys = (
-            "<Control-x>", "<Control-X>",
-            "<Control-Cyrillic_che>", "<Control-Cyrillic_CHE>",  # Ч
-            "<Shift-Delete>",
-        )
-        undo_keys = (
-            "<Control-z>", "<Control-Z>",
-            "<Control-Cyrillic_ya>", "<Control-Cyrillic_YA>",  # Я
-        )
-        redo_keys = (
-            "<Control-y>", "<Control-Y>",
-            "<Control-Cyrillic_en>", "<Control-Cyrillic_EN>",  # Н (на клавише Y)
-            "<Control-Shift-Z>", "<Control-Shift-z>",
-            "<Control-Shift-Cyrillic_ya>", "<Control-Shift-Cyrillic_YA>",
-        )
-
-        def safe_bind(widget: tk.Text, seqs: tuple, handler) -> None:
-            for seq in seqs:
-                try:
-                    widget.bind(seq, handler)
-                except tk.TclError:
-                    # Платформа не знает такой keysym (например, Cyrillic_*
-                    # на минимальной сборке Tk). Просто пропускаем.
-                    pass
-
-        copy_h = lambda e: (e.widget.event_generate("<<Copy>>"), "break")[1]
-        paste_h = lambda e: (e.widget.event_generate("<<Paste>>"), "break")[1]
-        cut_h = lambda e: (e.widget.event_generate("<<Cut>>"), "break")[1]
-
+        # Раньше пытались подвязывать <Control-Cyrillic_*> явно, но на Windows
+        # Tkinter при русской раскладке отдаёт другой keysym, чем на X11,
+        # из-за чего стандартные Ctrl+С / Ctrl+М на Windows не срабатывали.
+        # Решение — один обработчик <Control-KeyPress>, который диспетчеризует
+        # по event.keycode (на Windows это VK-код, не зависит от раскладки).
         for widget in (self.input_text, self.output_text):
-            safe_bind(widget, select_all_keys, self._select_all)
-            safe_bind(widget, copy_keys, copy_h)
-            safe_bind(widget, paste_keys, paste_h)
-            safe_bind(widget, cut_keys, cut_h)
-            safe_bind(widget, undo_keys, self._undo)
-            safe_bind(widget, redo_keys, self._redo)
+            widget.bind("<Control-KeyPress>", self._on_ctrl_key)
+            widget.bind("<Control-Insert>", self._copy)
+            widget.bind("<Shift-Insert>", self._paste)
+            widget.bind("<Shift-Delete>", self._cut)
             widget.bind("<Delete>", self._on_delete)
             widget.bind("<BackSpace>", self._on_backspace)
+
+    def _on_ctrl_key(self, event: tk.Event) -> str | None:
+        # Игнорируем модифицированные комбинации с Alt (например, AltGr на
+        # Windows == Ctrl+Alt) — в них Ctrl нажимать не имели в виду.
+        # Биты state: 0x0001 Shift, 0x0004 Control, 0x0008 Alt (X11),
+        # 0x20000 Alt (Windows).
+        if event.state & 0x20008:  # Alt held
+            return None
+
+        action = self._CTRL_ACTIONS.get(event.keycode)
+        if action is None:
+            action = self._CTRL_KEYSYMS.get(event.keysym)
+        if action is None:
+            return None  # не наш шорткат — дать сработать стандартному поведению
+
+        shift = bool(event.state & 0x0001)
+        if action == "undo" and shift:
+            action = "redo"  # Ctrl+Shift+Z = redo
+
+        if action == "select_all":
+            return self._select_all(event)
+        if action == "copy":
+            return self._copy(event)
+        if action == "paste":
+            return self._paste(event)
+        if action == "cut":
+            return self._cut(event)
+        if action == "undo":
+            return self._undo(event)
+        if action == "redo":
+            return self._redo(event)
+        return None
+
+    @staticmethod
+    def _copy(event: tk.Event) -> str:
+        event.widget.event_generate("<<Copy>>")
+        return "break"
+
+    @staticmethod
+    def _paste(event: tk.Event) -> str:
+        event.widget.event_generate("<<Paste>>")
+        return "break"
+
+    @staticmethod
+    def _cut(event: tk.Event) -> str:
+        event.widget.event_generate("<<Cut>>")
+        return "break"
 
     @staticmethod
     def _select_all(event: tk.Event) -> str:
