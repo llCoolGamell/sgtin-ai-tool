@@ -94,71 +94,173 @@ def process_lines(lines: Iterable[str], mode: str) -> Tuple[List[str], List[str]
     return results, errors
 
 
+# Цветовая палитра (Tailwind-подобная).
+BG = "#f1f5f9"          # фон окна — slate-100
+CARD = "#ffffff"        # фон текстовых полей
+BORDER = "#cbd5e1"      # рамка / линии
+TEXT = "#0f172a"        # основной текст
+MUTED = "#475569"       # вторичный текст / статус-бар
+DANGER = "#dc2626"      # «УДАЛИТЬ» — красный
+DANGER_HOVER = "#b91c1c"
+SUCCESS = "#16a34a"     # «Добавить» — зелёный
+SUCCESS_HOVER = "#15803d"
+NEUTRAL = "#64748b"     # «Очистить» — slate
+NEUTRAL_HOVER = "#475569"
+PRIMARY = "#2563eb"     # «Excel» — синий
+PRIMARY_HOVER = "#1d4ed8"
+FONT_UI = ("Segoe UI", 10)
+FONT_UI_BOLD = ("Segoe UI", 10, "bold")
+FONT_HEADING = ("Segoe UI", 11, "bold")
+FONT_MONO = ("Consolas", 11)
+
+
 class SgtinApp(tk.Tk):
     """Главное окно приложения."""
 
     def __init__(self) -> None:
         super().__init__()
         self.title("SGTIN AI 01-21 — инструмент")
-        self.geometry("900x700")
-        self.minsize(640, 480)
+        self.geometry("1000x760")
+        self.minsize(700, 520)
+        self.configure(bg=BG)
 
+        self._setup_style()
         self._build_ui()
         self._bind_shortcuts()
+
+    # ------------------------------------------------------------------
+    # Style
+    # ------------------------------------------------------------------
+    def _setup_style(self) -> None:
+        style = ttk.Style(self)
+        # «clam» позволяет красить ttk.Button фоном на всех платформах.
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+
+        style.configure(".", background=BG, foreground=TEXT, font=FONT_UI)
+        style.configure("TFrame", background=BG)
+        style.configure("Card.TFrame", background=CARD, relief="flat")
+        style.configure("TLabel", background=BG, foreground=TEXT, font=FONT_UI)
+        style.configure(
+            "Heading.TLabel", background=BG, foreground=TEXT, font=FONT_HEADING
+        )
+        style.configure(
+            "Status.TLabel", background=BG, foreground=MUTED, font=FONT_UI
+        )
+
+        def _btn(name: str, bg: str, hover: str) -> None:
+            style.configure(
+                name,
+                background=bg,
+                foreground="white",
+                bordercolor=bg,
+                lightcolor=bg,
+                darkcolor=bg,
+                focuscolor=bg,
+                padding=(14, 10),
+                font=FONT_UI_BOLD,
+                borderwidth=0,
+                relief="flat",
+            )
+            style.map(
+                name,
+                background=[("active", hover), ("pressed", hover)],
+                foreground=[("disabled", "#e2e8f0")],
+            )
+
+        _btn("Danger.TButton", DANGER, DANGER_HOVER)
+        _btn("Success.TButton", SUCCESS, SUCCESS_HOVER)
+        _btn("Neutral.TButton", NEUTRAL, NEUTRAL_HOVER)
+        _btn("Primary.TButton", PRIMARY, PRIMARY_HOVER)
 
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=8)
+        root = ttk.Frame(self, padding=14, style="TFrame")
         root.pack(fill=tk.BOTH, expand=True)
         root.rowconfigure(1, weight=1)
-        root.rowconfigure(3, weight=1)
+        root.rowconfigure(4, weight=1)
         root.columnconfigure(0, weight=1)
 
-        ttk.Label(root, text="Входные SGTIN (по одному в строке):").grid(
-            row=0, column=0, sticky="w"
-        )
+        ttk.Label(
+            root,
+            text="Входные SGTIN (по одному в строке):",
+            style="Heading.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
         self.input_text = self._make_text_area(root, row=1)
 
-        middle = ttk.Frame(root)
-        middle.grid(row=2, column=0, sticky="ew", pady=8)
+        middle = ttk.Frame(root, style="TFrame")
+        middle.grid(row=2, column=0, sticky="ew", pady=14)
         for col in range(4):
-            middle.columnconfigure(col, weight=1)
+            middle.columnconfigure(col, weight=1, uniform="btn")
 
         ttk.Button(
-            middle, text="УДАЛИТЬ AI 01-21", command=self.on_remove
-        ).grid(row=0, column=0, padx=4, sticky="ew")
+            middle,
+            text="УДАЛИТЬ AI 01-21",
+            command=self.on_remove,
+            style="Danger.TButton",
+            takefocus=False,
+        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
         ttk.Button(
-            middle, text="Добавить AI 01-21", command=self.on_add
-        ).grid(row=0, column=1, padx=4, sticky="ew")
+            middle,
+            text="Добавить AI 01-21",
+            command=self.on_add,
+            style="Success.TButton",
+            takefocus=False,
+        ).grid(row=0, column=1, padx=6, sticky="ew")
         ttk.Button(
-            middle, text="Очистить результат", command=self.on_clear_output
-        ).grid(row=0, column=2, padx=4, sticky="ew")
+            middle,
+            text="Очистить результат",
+            command=self.on_clear_output,
+            style="Neutral.TButton",
+            takefocus=False,
+        ).grid(row=0, column=2, padx=6, sticky="ew")
         ttk.Button(
-            middle, text="Выгрузить в Excel", command=self.on_export_excel
-        ).grid(row=0, column=3, padx=4, sticky="ew")
+            middle,
+            text="Выгрузить в Excel",
+            command=self.on_export_excel,
+            style="Primary.TButton",
+            takefocus=False,
+        ).grid(row=0, column=3, padx=(6, 0), sticky="ew")
 
-        ttk.Label(root, text="Результат:").grid(row=3, column=0, sticky="nw")
-        self.output_text = self._make_text_area(root, row=3, label_row=True)
+        ttk.Label(root, text="Результат:", style="Heading.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(0, 6)
+        )
+        self.output_text = self._make_text_area(root, row=4)
 
         self.status_var = tk.StringVar(value="Готово")
-        ttk.Label(root, textvariable=self.status_var, anchor="w").grid(
-            row=4, column=0, sticky="ew", pady=(4, 0)
-        )
+        ttk.Label(
+            root,
+            textvariable=self.status_var,
+            anchor="w",
+            style="Status.TLabel",
+        ).grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
-    def _make_text_area(
-        self, parent: ttk.Frame, row: int, label_row: bool = False
-    ) -> tk.Text:
-        frame = ttk.Frame(parent)
-        if label_row:
-            frame.grid(row=row, column=0, sticky="nsew", pady=(20, 0))
-        else:
-            frame.grid(row=row, column=0, sticky="nsew", pady=(2, 0))
+    def _make_text_area(self, parent: ttk.Frame, row: int) -> tk.Text:
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        frame.grid(row=row, column=0, sticky="nsew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
+        frame.configure(borderwidth=1, relief="solid")
 
-        text = tk.Text(frame, wrap="none", undo=True, font=("Consolas", 10))
+        text = tk.Text(
+            frame,
+            wrap="none",
+            undo=True,
+            maxundo=-1,
+            font=FONT_MONO,
+            bg=CARD,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=PRIMARY,
+            selectforeground="white",
+            relief="flat",
+            borderwidth=0,
+            padx=8,
+            pady=6,
+            highlightthickness=0,
+        )
         text.grid(row=0, column=0, sticky="nsew")
 
         yscroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
@@ -207,9 +309,62 @@ class SgtinApp(tk.Tk):
             pass
 
     def _bind_shortcuts(self) -> None:
+        # Маппинг действий: и латинская раскладка, и кириллическая (на тех же
+        # клавишах). В Tk при русской раскладке keysym становится Cyrillic_*
+        # и стандартные Control-a/c/v/x/z не срабатывают, поэтому
+        # подвязываем оба варианта.
+        select_all_keys = (
+            "<Control-a>", "<Control-A>",
+            "<Control-Cyrillic_ef>", "<Control-Cyrillic_EF>",  # Ф
+        )
+        copy_keys = (
+            "<Control-c>", "<Control-C>",
+            "<Control-Cyrillic_es>", "<Control-Cyrillic_ES>",  # С
+            "<Control-Insert>",
+        )
+        paste_keys = (
+            "<Control-v>", "<Control-V>",
+            "<Control-Cyrillic_em>", "<Control-Cyrillic_EM>",  # М
+            "<Shift-Insert>",
+        )
+        cut_keys = (
+            "<Control-x>", "<Control-X>",
+            "<Control-Cyrillic_che>", "<Control-Cyrillic_CHE>",  # Ч
+            "<Shift-Delete>",
+        )
+        undo_keys = (
+            "<Control-z>", "<Control-Z>",
+            "<Control-Cyrillic_ya>", "<Control-Cyrillic_YA>",  # Я
+        )
+        redo_keys = (
+            "<Control-y>", "<Control-Y>",
+            "<Control-Cyrillic_en>", "<Control-Cyrillic_EN>",  # Н (на клавише Y)
+            "<Control-Shift-Z>", "<Control-Shift-z>",
+            "<Control-Shift-Cyrillic_ya>", "<Control-Shift-Cyrillic_YA>",
+        )
+
+        def safe_bind(widget: tk.Text, seqs: tuple, handler) -> None:
+            for seq in seqs:
+                try:
+                    widget.bind(seq, handler)
+                except tk.TclError:
+                    # Платформа не знает такой keysym (например, Cyrillic_*
+                    # на минимальной сборке Tk). Просто пропускаем.
+                    pass
+
+        copy_h = lambda e: (e.widget.event_generate("<<Copy>>"), "break")[1]
+        paste_h = lambda e: (e.widget.event_generate("<<Paste>>"), "break")[1]
+        cut_h = lambda e: (e.widget.event_generate("<<Cut>>"), "break")[1]
+
         for widget in (self.input_text, self.output_text):
-            widget.bind("<Control-a>", self._select_all)
-            widget.bind("<Control-A>", self._select_all)
+            safe_bind(widget, select_all_keys, self._select_all)
+            safe_bind(widget, copy_keys, copy_h)
+            safe_bind(widget, paste_keys, paste_h)
+            safe_bind(widget, cut_keys, cut_h)
+            safe_bind(widget, undo_keys, self._undo)
+            safe_bind(widget, redo_keys, self._redo)
+            widget.bind("<Delete>", self._on_delete)
+            widget.bind("<BackSpace>", self._on_backspace)
 
     @staticmethod
     def _select_all(event: tk.Event) -> str:
@@ -218,6 +373,42 @@ class SgtinApp(tk.Tk):
         widget.mark_set("insert", "1.0")
         widget.see("insert")
         return "break"
+
+    @staticmethod
+    def _undo(event: tk.Event) -> str:
+        widget: tk.Text = event.widget  # type: ignore[assignment]
+        try:
+            widget.edit_undo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    @staticmethod
+    def _redo(event: tk.Event) -> str:
+        widget: tk.Text = event.widget  # type: ignore[assignment]
+        try:
+            widget.edit_redo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    @staticmethod
+    def _on_delete(event: tk.Event) -> str | None:
+        widget: tk.Text = event.widget  # type: ignore[assignment]
+        try:
+            widget.delete("sel.first", "sel.last")
+            return "break"
+        except tk.TclError:
+            return None  # нет выделения — пусть отработает стандартный Delete
+
+    @staticmethod
+    def _on_backspace(event: tk.Event) -> str | None:
+        widget: tk.Text = event.widget  # type: ignore[assignment]
+        try:
+            widget.delete("sel.first", "sel.last")
+            return "break"
+        except tk.TclError:
+            return None
 
     # ------------------------------------------------------------------
     # Actions
