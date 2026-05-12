@@ -1,21 +1,18 @@
-"""SGTIN AI 01-21 tool.
+"""SGTIN AI 01-21 tool (экспериментальная версия).
 
 Графический инструмент для пакетной обработки SGTIN кодов маркировки.
 
 Возможности:
-- Верхнее поле для ввода SGTIN (по одному в строке).
-- Кнопка "УДАЛИТЬ AI 01-21": убирает идентификаторы применения
-  AI(01) и AI(21) из строк длиной 31 символ.
-  - 31 символ: "01" + GTIN(14) + "21" + Serial(13) -> Serial+GTIN без AI = 27 символов.
-- Кнопка "Добавить AI 01-21": добавляет AI(01) и AI(21) к строкам
-  длиной 27 символов: GTIN(14) + Serial(13) -> "01" + GTIN + "21" + Serial = 31 символ.
-- Нижнее поле с результатом, поддерживает вставку, копирование, удаление, редактирование.
-- Кнопка "Выгрузить в Excel" сохраняет содержимое нижнего поля в .xlsx файл.
-- Рассчитано на тысячи строк: обработка идёт построчно без лишних копий.
+- УДАЛИТЬ AI 01-21 / Добавить AI 01-21 (строгая проверка 27/31).
+- В 27 / В 31 — извлечение SGTIN из GS1-строки любого формата
+  (с префиксами, доп. AI 91/92, и т.д.).
+- ЭКРАН — замена экранированных последовательностей (\\u001d, <GS>, \\n и т.д.) на реальные символы.
+- Выгрузка результата в Excel.
 """
 from __future__ import annotations
 
 import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Iterable, List, Tuple
@@ -68,17 +65,110 @@ def add_ai(code: str) -> str:
     return AI_01 + gtin + AI_21 + serial
 
 
+def extract_sgtin(line: str) -> Tuple[str, str]:
+    """Извлечь (GTIN14, Serial) из любого формата GS1-строки.
+
+    Поддерживает:
+    - 27 символов: GTIN(14) + Serial(13)
+    - 31 символ: 01+GTIN(14)+21+Serial(13)
+    - Длинные GS1-строки с доп. AI (91,92,...), разделённые
+      пробелами или GS (\x1d).
+    - Префиксы вроде '[DATAMATRIX (GS1)]:'
+    """
+    s = line.strip()
+
+    # Убираем префиксы вроде '[DATAMATRIX (GS1)]:'
+    if ":" in s:
+        after = s.split(":", 1)[1].strip()
+        if after:
+            s = after
+
+    # 27 символов и все печатные без пробелов
+    if len(s) == ADD_LEN and " " not in s:
+        return s[:GTIN_LEN], s[GTIN_LEN:]
+
+    # 31 символ с AI
+    if (
+        len(s) == REMOVE_LEN
+        and s.startswith(AI_01)
+        and s[len(AI_01) + GTIN_LEN : len(AI_01) + GTIN_LEN + len(AI_21)] == AI_21
+        and " " not in s
+    ):
+        return s[len(AI_01) : len(AI_01) + GTIN_LEN], s[len(AI_01) + GTIN_LEN + len(AI_21) :]
+
+    # Общий поиск: 01<14цифр>21<13 непробельных>
+    m = re.search(r"01(\d{14})21(\S{13})", s)
+    if m:
+        return m.group(1), m.group(2)
+
+    # Попробуем поиск с переменной длиной serial (до разделителя)
+    m = re.search(r"01(\d{14})21([^\x1d\s]+)", s)
+    if m:
+        serial = m.group(2)
+        return m.group(1), serial[:SERIAL_LEN] if len(serial) > SERIAL_LEN else serial
+
+    raise ValueError("не удалось извлечь SGTIN (нет паттерна 01+GTIN+21+Serial)")
+
+
+def convert_to_27(line: str) -> str:
+    """Извлечь SGTIN в 27-символьном формате (GTIN+Serial) из любого входа."""
+    gtin, serial = extract_sgtin(line)
+    return gtin + serial
+
+
+def convert_to_31(line: str) -> str:
+    """Извлечь SGTIN в 31-символьном формате (01+GTIN+21+Serial) из любого входа."""
+    gtin, serial = extract_sgtin(line)
+    return AI_01 + gtin + AI_21 + serial
+
+
+_ESCAPE_RE = re.compile(
+    r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([nrtbfv'\"\\/ ]))"
+)
+
+
+def _escape_repl(m: re.Match) -> str:
+    if m.group(1):  # \uXXXX
+        return chr(int(m.group(1), 16))
+    if m.group(2):  # \xHH
+        return chr(int(m.group(2), 16))
+    ch = m.group(3)
+    return {
+        "n": "\n", "r": "\r", "t": "\t", "b": "\b",
+        "f": "\f", "v": "\v", "\\\\": "\\",
+        "'": "'", '"': '"', "/": "/", " ": " ",
+    }.get(ch, ch)
+
+
+def unescape_line(line: str) -> str:
+    """Заменить экранированные последовательности на реальные символы.
+
+    Поддерживает: \\u001d, \\xHH, \\n, \\t, \\\\, <GS>.
+    """
+    s = line
+    # Общепринятые замены для GS1-меток
+    s = s.replace("<GS>", "\x1d").replace("<gs>", "\x1d")
+    s = s.replace("[GS]", "\x1d").replace("[gs]", "\x1d")
+    # Замена стандартных escape-последовательностей
+    s = _ESCAPE_RE.sub(_escape_repl, s)
+    return s
+
+
 def process_lines(lines: Iterable[str], mode: str) -> Tuple[List[str], List[str]]:
     """Применить выбранную операцию к каждой непустой строке.
 
     Возвращает (результаты, ошибки). Каждая ошибка содержит номер строки
     (1-based) и описание проблемы.
     """
-    if mode == "remove":
-        op = remove_ai
-    elif mode == "add":
-        op = add_ai
-    else:  # pragma: no cover - defensive
+    ops = {
+        "remove": remove_ai,
+        "add": add_ai,
+        "to_27": convert_to_27,
+        "to_31": convert_to_31,
+        "unescape": unescape_line,
+    }
+    op = ops.get(mode)
+    if op is None:
         raise ValueError(f"неизвестная операция: {mode}")
 
     results: List[str] = []
@@ -108,6 +198,8 @@ NEUTRAL = "#64748b"     # «Очистить» — slate
 NEUTRAL_HOVER = "#475569"
 PRIMARY = "#2563eb"     # «Excel» — синий
 PRIMARY_HOVER = "#1d4ed8"
+AMBER = "#d97706"       # «ЭКРАН» — янтарный
+AMBER_HOVER = "#b45309"
 FONT_UI = ("Segoe UI", 10)
 FONT_UI_BOLD = ("Segoe UI", 10, "bold")
 FONT_HEADING = ("Segoe UI", 11, "bold")
@@ -178,6 +270,7 @@ class SgtinApp(tk.Tk):
         _btn("Success.TButton", SUCCESS, SUCCESS_HOVER)
         _btn("Neutral.TButton", NEUTRAL, NEUTRAL_HOVER)
         _btn("Primary.TButton", PRIMARY, PRIMARY_HOVER)
+        _btn("Amber.TButton", AMBER, AMBER_HOVER)
 
     # ------------------------------------------------------------------
     # UI
@@ -201,6 +294,7 @@ class SgtinApp(tk.Tk):
         for col in range(4):
             middle.columnconfigure(col, weight=1, uniform="btn")
 
+        # Ряд 1 — преобразование
         ttk.Button(
             middle,
             text="УДАЛИТЬ AI 01-21",
@@ -217,18 +311,41 @@ class SgtinApp(tk.Tk):
         ).grid(row=0, column=1, padx=6, sticky="ew")
         ttk.Button(
             middle,
+            text="В 27",
+            command=self.on_to_27,
+            style="Danger.TButton",
+            takefocus=False,
+        ).grid(row=0, column=2, padx=6, sticky="ew")
+        ttk.Button(
+            middle,
+            text="В 31",
+            command=self.on_to_31,
+            style="Success.TButton",
+            takefocus=False,
+        ).grid(row=0, column=3, padx=(6, 0), sticky="ew")
+
+        # Ряд 2 — утилиты
+        ttk.Button(
+            middle,
+            text="ЭКРАН",
+            command=self.on_unescape,
+            style="Amber.TButton",
+            takefocus=False,
+        ).grid(row=1, column=0, padx=(0, 6), pady=(8, 0), sticky="ew")
+        ttk.Button(
+            middle,
             text="Очистить результат",
             command=self.on_clear_output,
             style="Neutral.TButton",
             takefocus=False,
-        ).grid(row=0, column=2, padx=6, sticky="ew")
+        ).grid(row=1, column=2, padx=6, pady=(8, 0), sticky="ew")
         ttk.Button(
             middle,
             text="Выгрузить в Excel",
             command=self.on_export_excel,
             style="Primary.TButton",
             takefocus=False,
-        ).grid(row=0, column=3, padx=(6, 0), sticky="ew")
+        ).grid(row=1, column=3, padx=(6, 0), pady=(8, 0), sticky="ew")
 
         ttk.Label(root, text="Результат:", style="Heading.TLabel").grid(
             row=3, column=0, sticky="w", pady=(0, 6)
@@ -712,6 +829,15 @@ class SgtinApp(tk.Tk):
 
     def on_add(self) -> None:
         self._run("add")
+
+    def on_to_27(self) -> None:
+        self._run("to_27")
+
+    def on_to_31(self) -> None:
+        self._run("to_31")
+
+    def on_unescape(self) -> None:
+        self._run("unescape")
 
     def on_clear_output(self) -> None:
         self.output_text.delete("1.0", "end")
