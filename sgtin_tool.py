@@ -570,22 +570,29 @@ class SgtinApp(tk.Tk):
         # Логируем в диагностику (если открыта) — всегда, даже если действие не найдено.
         self._log_key_event(event)
 
-        # Игнорируем модифицированные комбинации с Alt (например, AltGr на
-        # Windows == Ctrl+Alt) — в них Ctrl нажимать не имели в виду.
-        # Биты state: 0x0001 Shift, 0x0004 Control, 0x0008 Alt (X11),
-        # 0x20000 Alt (Windows).
-        if event.state & 0x20008:  # Alt held
-            return None
+        # ВАЖНО про event.state на Windows: его биты могут включать
+        # «постоянно установленные» флаги вроде Caps/NumLock и побочные
+        # бит-маски, которые **не** соответствуют классическим X11
+        # ShiftMask/ControlMask/Mod1Mask. Поэтому НЕ полагаемся на состояние
+        # как фильтр — диспетчеризуем по самому надёжному сигналу:
+        # event.char для Ctrl+латиница == control-символ \x01..\x1a (Tk
+        # формирует его и под русской раскладкой, потому что физическая
+        # клавиша одна и та же), event.keycode (Windows VK — независим от
+        # раскладки) и event.keysym (Latin/Cyrillic_*) как резерв.
+        action: str | None = None
 
-        action = self._CTRL_ACTIONS.get(event.keycode)
+        char = event.char or ""
+        if len(char) == 1 and 1 <= ord(char) <= 26:
+            # Ctrl+<буква>: \x01==A, \x03==C, \x16==V, \x18==X, \x19==Y,
+            # \x1a==Z. Маппим в латинский keysym.
+            letter = chr(ord(char) + ord("a") - 1)
+            action = self._CTRL_KEYSYMS.get(letter)
+
+        if action is None:
+            action = self._CTRL_ACTIONS.get(event.keycode)
         if action is None:
             action = self._CTRL_KEYSYMS.get(event.keysym)
-        # Резерв: на Windows при Ctrl+латиница event.char часто — control-символ
-        # (\x01..\x1a). Используем это как последний сигнал.
-        if action is None and event.char and len(event.char) == 1:
-            code = ord(event.char)
-            if 1 <= code <= 26:
-                action = self._CTRL_KEYSYMS.get(chr(code + ord("a") - 1))
+
         if action is None:
             return None  # не наш шорткат — дать сработать стандартному поведению
 
