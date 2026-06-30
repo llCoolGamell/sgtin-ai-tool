@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import html
 import os
 import re
@@ -29,6 +31,58 @@ try:
     import ppf.datamatrix as _ppfdm  # type: ignore[import]
 except ImportError:  # pragma: no cover
     _ppfdm = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Поддержка FNC1 в ppf.datamatrix.
+#
+# Настоящий GS1 DataMatrix начинается со спецсимвола FNC1 (codeword 232 в
+# ASCII-кодировке DataMatrix). Сама библиотека ppf.datamatrix его не умеет
+# вставлять, поэтому мы переопределяем её ASCII-кодек: символ-маркер FNC1
+# (\x1e, который в реальных кодах не встречается) кодируется в codeword 232.
+# ---------------------------------------------------------------------------
+FNC1_MARKER = "\x1e"  # внутренний маркер начала GS1-кода (превратится в 232)
+
+
+def _register_fnc1_codec() -> None:
+    if _ppfdm is None:
+        return
+    try:
+        import codecs
+        from ppf.datamatrix import codec_ascii as _ca
+    except Exception:  # pragma: no cover
+        return
+
+    _digits = _ca.DIGITS
+
+    def _encode_with_fnc1(msg):
+        enc = []
+        i = 0
+        while i < len(msg):
+            ch = msg[i]
+            if ch == FNC1_MARKER:
+                enc.append(232)  # codeword FNC1
+                i += 1
+                continue
+            if ch in _digits and i + 1 < len(msg) and msg[i + 1] in _digits:
+                enc.append(130 + int(msg[i:i + 2]))
+                i += 2
+                continue
+            enc.append(list(ch.encode("ascii"))[0] + 1)
+            i += 1
+        return bytes(enc), len(enc)
+
+    def _search(name):
+        if name != "datamatrix.ascii":
+            return None
+        return codecs.CodecInfo(
+            _encode_with_fnc1, _ca.decode_from_ascii, name="datamatrix.ascii"
+        )
+
+    codecs.register(_search)
+
+
+_register_fnc1_codec()
 
 try:
     from PIL import Image, ImageTk  # type: ignore[import]
@@ -288,6 +342,63 @@ def insert_gs_separators(line: str, strict: bool = False) -> str:
     return s
 
 
+_B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+# Признак уже готового кода маркировки: 01 + 14 цифр (GTIN).
+_SGTIN_START_RE = re.compile(r"^\x1e?01\d{14}")
+
+
+def looks_like_base64(s: str) -> bool:
+    """Грубая эвристика: похожа ли строка на base64 (а не на код маркировки).
+
+    Код маркировки начинается с '01'+14 цифр — такие строки base64 НЕ считаем.
+    base64: только символы [A-Za-z0-9+/=], длина кратна 4, достаточно длинная.
+    """
+    s = s.strip()
+    if not s or len(s) < 16 or len(s) % 4 != 0:
+        return False
+    # Если это уже готовый код маркировки — это не base64.
+    if _SGTIN_START_RE.match(s):
+        return False
+    return bool(_B64_RE.match(s))
+
+
+def try_decode_base64(line: str) -> Tuple[str, bool]:
+    """Попробовать раскодировать base64-строку в код маркировки.
+
+    Возвращает (код, was_base64). Если строка была base64 и декодировалась
+    в осмысленный код маркировки (содержит 01+GTIN+21) — возвращаем его и
+    True. Иначе возвращаем исходную строку и False.
+
+    Внутри декодированного кода уже может присутствовать FNC1 (\\x1d или
+    \\xe8) и разделители GS — мы их сохраняем как есть.
+    """
+    s = line.strip()
+    if not looks_like_base64(s):
+        return line, False
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except (binascii.Error, ValueError):
+        return line, False
+    # Пробуем расшифровать как текст (latin-1 покрывает все байты 0..255,
+    # включая GS \x1d и FNC1 \xe8, не теряя данных).
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        decoded = raw.decode("latin-1")
+    # Нормализуем возможный FNC1: байт 0xE8 (ASCII 232) или \x1d в начале —
+    # это служебные символы GS1, при дальнейшей генерации учтём отдельно.
+    # Проверяем, что внутри реально код маркировки.
+    probe = decoded.lstrip("\x1d\xe8\x1e").strip()
+    if re.match(r"^01\d{14}21", probe):
+        return decoded, True
+    return line, False
+
+
+def has_embedded_fnc1(code: str) -> bool:
+    """Есть ли в начале кода уже вставленный FNC1 (\\xe8 / \\x1e / маркер)."""
+    return code[:1] in ("\xe8", "\x1e", FNC1_MARKER)
+
+
 def matrix_to_image(matrix: List[List[int]], target_size: int = 300,
                     quiet: int = 1):
     """Отрисовать матрицу DataMatrix в чёрно-белую PIL.Image.
@@ -321,11 +432,17 @@ def matrix_to_image(matrix: List[List[int]], target_size: int = 300,
     return img
 
 
-def make_datamatrix(payload: str, size: int = 300):
-    """Сгенерировать DataMatrix-картинку для готового payload."""
+def make_datamatrix(payload: str, size: int = 300, fnc1: bool = True):
+    """Сгенерировать DataMatrix-картинку для готового payload.
+
+    fnc1=True — генерируется настоящий GS1 DataMatrix: в начало кода
+    добавляется спецсимвол FNC1 (codeword 232). Это рекомендованный
+    формат для Честного знака. fnc1=False — обычный DataMatrix без FNC1.
+    """
     if _ppfdm is None:
         raise RuntimeError("ppf.datamatrix не установлен (pip install ppf.datamatrix)")
-    dm = _ppfdm.DataMatrix(payload)
+    data = (FNC1_MARKER + payload) if fnc1 else payload
+    dm = _ppfdm.DataMatrix(data)
     return matrix_to_image(dm.matrix, target_size=size)
 
 
@@ -400,6 +517,9 @@ class SgtinApp(tk.Tk):
         self._diag_text: tk.Text | None = None
         self._last_log_serial: int | None = None
 
+        # Галочка GS1 DataMatrix (FNC1) — включена при каждом запуске.
+        self.fnc1_var = tk.BooleanVar(value=True)
+
         self._setup_style()
         self._build_ui()
         self._build_menu()
@@ -423,6 +543,13 @@ class SgtinApp(tk.Tk):
         )
         style.configure(
             "Status.TLabel", background=BG, foreground=MUTED, font=FONT_UI
+        )
+        style.configure(
+            "TCheckbutton", background=BG, foreground=TEXT, font=FONT_UI
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", BG)],
         )
 
         def _btn(name: str, bg: str, hover: str) -> None:
@@ -563,14 +690,23 @@ class SgtinApp(tk.Tk):
             takefocus=False,
         ).grid(row=2, column=0, columnspan=4, pady=(12, 0), sticky="ew")
 
-        # Ряд 4 — выгрузка в Excel, в самом низу панели.
+        # Ряд 4 — галочка GS1 DataMatrix (FNC1).
+        ttk.Checkbutton(
+            middle,
+            text="GS1 DataMatrix (добавлять FNC1) — рекомендуется для Честного знака",
+            variable=self.fnc1_var,
+            style="TCheckbutton",
+            takefocus=False,
+        ).grid(row=3, column=0, columnspan=4, pady=(8, 0), sticky="w")
+
+        # Ряд 5 — выгрузка в Excel, в самом низу панели.
         ttk.Button(
             middle,
             text="Выгрузить в Excel",
             command=self.on_export_excel,
             style="Primary.TButton",
             takefocus=False,
-        ).grid(row=3, column=0, columnspan=4, pady=(8, 0), sticky="ew")
+        ).grid(row=4, column=0, columnspan=4, pady=(8, 0), sticky="ew")
 
         ttk.Label(root, text="Результат:", style="Heading.TLabel").grid(
             row=3, column=0, sticky="w", pady=(0, 6)
@@ -1141,15 +1277,32 @@ class SgtinApp(tk.Tk):
             )
             return
 
-        # Готовим payload каждого кода (вставка GS, где нужно).
-        # strict=True — если в коде есть AI 91/92/93, но GS расставить
-        # не удалось, считаем код ошибочным и не кодируем его.
+        # Готовим payload каждого кода.
+        # 1) Если строка похожа на base64 — декодируем её в код маркировки.
+        # 2) Вставляем GS-разделители (strict — ошибка, если 91/92/93 без структуры).
+        # 3) Если в декодированном коде УЖЕ есть FNC1 — для него добавление
+        #    FNC1 отключаем индивидуально (чтобы не задвоить).
+        global_fnc1 = self.fnc1_var.get()
         prepared: List[str] = []
+        fnc1_flags: List[bool] = []
         good_codes: List[str] = []
         errors: List[str] = []
         for idx, c in enumerate(codes, start=1):
             try:
-                prepared.append(insert_gs_separators(c, strict=True))
+                decoded, was_b64 = try_decode_base64(c)
+                embedded = has_embedded_fnc1(decoded)
+                # Убираем уже вставленный FNC1-байт из начала перед обработкой
+                # (мы добавим свой при генерации, если нужно).
+                clean = decoded
+                if embedded:
+                    clean = decoded.lstrip("\xe8\x1e" + FNC1_MARKER)
+                payload = insert_gs_separators(clean, strict=True)
+                prepared.append(payload)
+                # FNC1 ставим, если включена галочка. Если код пришёл из
+                # base64 с уже встроенным FNC1 — всё равно ставим один свой
+                # (после очистки), сохраняя единообразие. Если галочка выкл —
+                # не ставим.
+                fnc1_flags.append(global_fnc1)
                 good_codes.append(c)
             except ValueError as exc:
                 errors.append(f"строка {idx}: '{c}' — {exc}")
@@ -1169,14 +1322,18 @@ class SgtinApp(tk.Tk):
         codes = good_codes
 
         if len(codes) == 1:
-            DataMatrixPreview(self, payload=prepared[0], display=codes[0])
+            DataMatrixPreview(
+                self, payload=prepared[0], display=codes[0],
+                fnc1=fnc1_flags[0],
+            )
             self.status_var.set("Окно DataMatrix открыто")
             return
 
-        self._export_datamatrix_batch(codes, prepared)
+        self._export_datamatrix_batch(codes, prepared, fnc1_flags=fnc1_flags)
 
     def _export_datamatrix_batch(
-        self, codes: List[str], prepared: List[str]
+        self, codes: List[str], prepared: List[str],
+        fnc1_flags: List[bool] | None = None,
     ) -> None:
         # Спрашиваем формат — Excel или Word.
         choice = _ask_choice(
@@ -1211,7 +1368,12 @@ class SgtinApp(tk.Tk):
 
         try:
             # Генерируем картинки один раз.
-            images = [make_datamatrix(p, size=300) for p in prepared]
+            if fnc1_flags is None:
+                fnc1_flags = [True] * len(prepared)
+            images = [
+                make_datamatrix(p, size=300, fnc1=f)
+                for p, f in zip(prepared, fnc1_flags)
+            ]
         except Exception as exc:  # pragma: no cover
             messagebox.showerror(
                 "Ошибка генерации DataMatrix", str(exc)
@@ -1425,7 +1587,8 @@ class DataMatrixPreview(tk.Toplevel):
     Кнопки: Сохранить PNG, Копировать в буфер обмена, Печать, ×2 (увеличить).
     """
 
-    def __init__(self, parent: tk.Misc, payload: str, display: str) -> None:
+    def __init__(self, parent: tk.Misc, payload: str, display: str,
+                 fnc1: bool = True) -> None:
         super().__init__(parent)
         self.title("DataMatrix")
         self.configure(bg=BG)
@@ -1434,6 +1597,7 @@ class DataMatrixPreview(tk.Toplevel):
 
         self.payload = payload
         self.display = display
+        self.fnc1 = fnc1
         self.size = 300
         self._photo: ImageTk.PhotoImage | None = None
         self._image = None  # PIL.Image
@@ -1477,7 +1641,7 @@ class DataMatrixPreview(tk.Toplevel):
         self._zoom_btn.pack(side=tk.RIGHT)
 
     def _render(self) -> None:
-        self._image = make_datamatrix(self.payload, size=self.size)
+        self._image = make_datamatrix(self.payload, size=self.size, fnc1=self.fnc1)
         self._photo = ImageTk.PhotoImage(self._image)  # type: ignore[union-attr]
         self._img_label.configure(
             image=self._photo, width=self.size, height=self.size
