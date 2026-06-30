@@ -28,9 +28,12 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build EXE
+      - name: Verify deps importable
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name sgtin-tool sgtin_tool.py
+          python -c "import ppf.datamatrix, PIL; print('deps OK')"
+
+      - name: Build EXE
+        run: pyinstaller --noconfirm --onefile --windowed --name sgtin-tool --collect-all ppf --collect-submodules ppf --hidden-import ppf.datamatrix --collect-all PIL --hidden-import PIL._tkinter_finder sgtin_tool.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
